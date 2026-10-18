@@ -1,0 +1,58 @@
+# Fork-only workflow: tests and builds the TUI replay-memory fix for local trials.
+name: fork-tui-memory
+
+on:
+  push:
+    branches: [tui-bound-thread-replay-memory]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: macos-14
+    timeout-minutes: 120
+    env:
+      # Debug-build TUI tests need more than the default 2 MiB test thread stack,
+      # as in upstream rust-ci.yml.
+      RUST_MIN_STACK: "8388608"
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Clippy
+        run: cargo clippy -p codex-tui --tests --no-deps -- -D warnings
+      - name: Feature flag tests
+        run: cargo test -p codex-features
+      # Upstream runs these with nextest, one process per test: insta snapshot
+      # state and timing-sensitive tests break when all share one process.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.103
+      - name: Replay buffer and routing tests
+        run: "cargo nextest run -p codex-tui --lib --retries 2 -E 'test(/^app::/)'"
+
+  build:
+    runs-on: macos-14
+    timeout-minutes: 150
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Build codex (release, aarch64-apple-darwin)
+        run: cargo build --release -p codex-cli --bin codex
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/codex dist/codex
+          strip -S dist/codex || true
+          tar -C dist -czf codex-aarch64-apple-darwin.tar.gz codex
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-aarch64-apple-darwin
+          path: codex-rs/codex-aarch64-apple-darwin.tar.gz
+          retention-days: 14
