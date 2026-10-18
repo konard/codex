@@ -75,6 +75,12 @@ pub(super) struct ThreadEventStore {
     pub(super) capacity: usize,
     pub(super) active: bool,
     pub(super) buffered_agent_message_delta_bytes: usize,
+    // Byte bound for buffered events; `None` keeps the count-only bound.
+    pub(super) byte_budget: Option<usize>,
+    // Estimated bytes of every buffered event, tracked only with a byte budget.
+    pub(super) buffered_event_bytes: usize,
+    // Set once events left the buffer; the next replay refreshes history from the server.
+    pub(super) replay_truncated: bool,
     delegated_turns: VecDeque<String>,
     recap_progress: recap::RecapProgress,
 }
@@ -120,6 +126,9 @@ impl ThreadEventStore {
             capacity,
             active: false,
             buffered_agent_message_delta_bytes: 0,
+            byte_budget: None,
+            buffered_event_bytes: 0,
+            replay_truncated: false,
             delegated_turns: VecDeque::new(),
             recap_progress: recap::RecapProgress::default(),
         }
@@ -144,7 +153,8 @@ impl ThreadEventStore {
 
     pub(super) fn rebase_buffer_after_session_refresh(&mut self) {
         self.buffer.retain_mut(Self::event_survives_session_refresh);
-        self.buffered_agent_message_delta_bytes = 0;
+        self.recount_buffered_bytes();
+        self.replay_truncated = false;
     }
 
     pub(super) fn set_turns(&mut self, turns: Vec<Turn>) {
@@ -293,6 +303,13 @@ impl ThreadEventStore {
                 | ServerNotification::ProcessOutputDelta(_)
                 | ServerNotification::ProcessExited(_)
         ) {
+            return;
+        }
+        // Replay only refreshes the status line for turn diffs, and each one carries the whole
+        // aggregated diff of the turn.
+        if self.byte_budget.is_some()
+            && matches!(notification.as_ref(), ServerNotification::TurnDiffUpdated(_))
+        {
             return;
         }
 
@@ -587,11 +604,17 @@ pub(super) struct ThreadEventChannel {
 
 impl ThreadEventChannel {
     pub(super) fn new(capacity: usize) -> Self {
+        Self::new_with_byte_budget(capacity, /*byte_budget*/ None)
+    }
+
+    pub(super) fn new_with_byte_budget(capacity: usize, byte_budget: Option<usize>) -> Self {
         let (sender, receiver) = mpsc::channel(capacity);
+        let mut store = ThreadEventStore::new(capacity);
+        store.byte_budget = byte_budget;
         Self {
             sender,
             receiver: Some(receiver),
-            store: Arc::new(Mutex::new(ThreadEventStore::new(capacity))),
+            store: Arc::new(Mutex::new(store)),
             attachment: ThreadEventAttachment::Live,
         }
     }

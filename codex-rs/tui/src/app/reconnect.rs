@@ -418,6 +418,7 @@ impl App {
             store
                 .buffer
                 .retain(|event| matches!(event, ThreadBufferedEvent::Notification(_)));
+            store.recount_buffered_bytes();
             if let Some(input) = store.input_state.as_mut() {
                 input.reconnect_pending = true;
             }
@@ -454,7 +455,10 @@ impl App {
             if started.blocks_direct_input {
                 self.agent_navigation.mark_parent_owned(id);
             }
-            let channel = ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY);
+            let channel = ThreadEventChannel::new_with_byte_budget(
+                THREAD_EVENT_CHANNEL_CAPACITY,
+                self.thread_replay_byte_budget(),
+            );
             {
                 let mut store = channel.store.lock().await;
                 store.set_session(started.session, started.turns);

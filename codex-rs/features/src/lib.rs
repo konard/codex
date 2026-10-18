@@ -201,6 +201,9 @@ pub enum Feature {
     MemoryTool,
     /// Enable importing project-scoped memory from external agents.
     ExternalAgentMemoryImport,
+    /// Bound the TUI's per-thread replay buffers by bytes and drop idle or compacted history
+    /// that a thread refresh can reload, so long multi-agent sessions stop growing.
+    BoundedThreadReplay,
     /// Compress cold local thread-store rollout files, including shared histories.
     /// Requires every reader of the Codex home to support compressed shared histories.
     LocalThreadStoreCompression,
@@ -1307,6 +1310,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::ExternalAgentMemoryImport,
         key: "external_agent_memory_import",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::BoundedThreadReplay,
+        key: "bounded_thread_replay",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },

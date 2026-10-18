@@ -799,6 +799,9 @@
             "bedrock_setup_wizard": {
               "type": "boolean"
             },
+            "bounded_thread_replay": {
+              "type": "boolean"
+            },
             "browser_annotation_api": {
               "type": "boolean"
             },
@@ -7206,6 +7209,9 @@
           "type": "boolean"
         },
         "bedrock_setup_wizard": {
+          "type": "boolean"
+        },
+        "bounded_thread_replay": {
           "type": "boolean"
         },
         "browser_annotation_api": {

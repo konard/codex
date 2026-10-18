@@ -73,9 +73,22 @@ impl App {
     }
 
     pub(super) fn ensure_thread_channel(&mut self, thread_id: ThreadId) -> &mut ThreadEventChannel {
+        let byte_budget = self.thread_replay_byte_budget();
         self.thread_event_channels
             .entry(thread_id)
-            .or_insert_with(|| ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY))
+            .or_insert_with(|| {
+                ThreadEventChannel::new_with_byte_budget(THREAD_EVENT_CHANNEL_CAPACITY, byte_budget)
+            })
+    }
+
+    /// Whether `bounded_thread_replay` lets replay buffers drop history a refresh can reload.
+    pub(super) fn bounded_thread_replay(&self) -> bool {
+        self.config.features.enabled(Feature::BoundedThreadReplay)
+    }
+
+    pub(super) fn thread_replay_byte_budget(&self) -> Option<usize> {
+        self.bounded_thread_replay()
+            .then_some(thread_event_buffer::MAX_BUFFERED_EVENT_BYTES)
     }
 
     pub(super) async fn set_thread_active(&mut self, thread_id: ThreadId, active: bool) {
@@ -1090,6 +1103,17 @@ impl App {
         let is_turn_started = matches!(notification, ServerNotification::TurnStarted(_));
         let is_thread_closed = matches!(notification, ServerNotification::ThreadClosed(_));
         let notification_status_change = SideParentStatusChange::for_notification(&notification);
+        // With `bounded_thread_replay`, idle background subagents and compacted threads keep only
+        // what history cannot rebuild; switching to one refreshes its transcript from the server
+        // instead of replaying a retained copy.
+        let bounded_replay =
+            self.bounded_thread_replay() && !self.side_threads.contains_key(&thread_id);
+        let compacts_when_idle = bounded_replay && self.primary_thread_id != Some(thread_id);
+        let is_compaction = matches!(
+            &notification,
+            ServerNotification::ItemCompleted(completed)
+                if matches!(completed.item, ThreadItem::ContextCompaction { .. })
+        );
         let (sender, store) = {
             let channel = self.ensure_thread_channel(thread_id);
             (channel.sender.clone(), Arc::clone(&channel.store))
@@ -1122,6 +1146,14 @@ impl App {
                 guard.push_notification(notification);
                 None
             };
+            if ((turn_stopped && compacts_when_idle) || (is_compaction && bounded_replay))
+                && guard
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.rollout_path.is_some())
+            {
+                guard.compact_replay_buffer();
+            }
             (
                 notification,
                 previous_pending_status,
@@ -1519,7 +1551,11 @@ impl App {
         is_replay_only: bool,
         snapshot: &mut ThreadEventSnapshot,
     ) -> bool {
-        if !self.should_refresh_snapshot_session(thread_id, is_replay_only, snapshot) {
+        if !self.should_refresh_snapshot_session(thread_id, is_replay_only, snapshot)
+            && !self
+                .should_refresh_truncated_replay(thread_id, is_replay_only)
+                .await
+        {
             return true;
         }
 
@@ -1565,6 +1601,25 @@ impl App {
                             .as_ref()
                             .is_some_and(|profile| !profile.id.starts_with(':')))
             })
+    }
+
+    /// A replay that lost buffered events to the byte/count bounds or idle compaction
+    /// rebuilds its transcript from server history.
+    pub(super) async fn should_refresh_truncated_replay(
+        &self,
+        thread_id: ThreadId,
+        is_replay_only: bool,
+    ) -> bool {
+        if !self.bounded_thread_replay()
+            || is_replay_only
+            || self.side_threads.contains_key(&thread_id)
+        {
+            return false;
+        }
+        match self.thread_event_channels.get(&thread_id) {
+            Some(channel) => channel.store.lock().await.replay_truncated,
+            None => false,
+        }
     }
 
     pub(super) async fn apply_refreshed_snapshot_thread(
